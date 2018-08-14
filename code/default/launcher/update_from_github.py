@@ -156,19 +156,19 @@ def parse_readme_versions(readme_file):
     try:
         fd = open(readme_file, "r")
         lines = fd.readlines()
-        p = re.compile(r'https://codeload.github.com/XX-net/XX-Net/zip/([0-9]+)\.([0-9]+)\.([0-9]+) ([0-9a-f]*)')
+        p = re.compile(r'https://codeload.github.com/XX-net/XX-Net/zip/([0-9]+)\.([0-9]+)\.([0-9]+) ([0-9a-fA-F]*)')
         for line in lines:
             m = p.match(line)
             if m:
                 version = m.group(1) + "." + m.group(2) + "." + m.group(3)
-                hashsum = m.group(4)
+                hashsum = m.group(4).lower()
                 versions.append([m.group(0), version, hashsum])
                 if len(versions) == 2:
                     return versions
     except Exception as e:
         xlog.exception("xxnet_version fail:%r", e)
 
-    raise "get_version_fail:%s" % readme_file
+    raise Exception("get_version_fail:%s" % readme_file)
 
 
 def current_version():

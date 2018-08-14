@@ -38,21 +38,22 @@ if __name__ == "__main__":
 enable_ipv6_temp = os.path.join(current_path, 'enable_ipv6_temp.bat')
 disable_ipv6_temp = os.path.join(current_path, 'disable_ipv6_temp.bat')
 set_best_server_temp = os.path.join(current_path, 'set_best_server_temp.bat')
+switch_pp_temp = os.path.join(current_path, 'switch_pp_temp.bat')
 
 enable_cmds = """
 @echo Starting...
-@set log_file="%s"
+@set log_file="{}"
 
 @echo Config servers...
-@call:[config servers]>>"%%%%log_file%%%%"
+@call:[config servers]>>%log_file%
 
 @echo Reset IPv6...
-@call:[reset ipv6]>>"%%%%log_file%%%%"
+@call:[reset ipv6]>>%log_file%
 
 @echo Set IPv6 Tunnel...
-@call:[set ipv6]>>"%%%%log_file%%%%"
+@call:[set ipv6]>>%log_file%
 
-@call:[print state]>>"%%%%log_file%%%%"
+@call:[print state]>>%log_file%
 
 @echo Over
 @echo Reboot system at first time!
@@ -95,15 +96,31 @@ goto :eof
 
 
 :[set ipv6]
-netsh interface teredo set state type=%%s servername=%%s.
+:: Reset Group Policy Teredo
+"{}" "{}\\win_reset_gp.py"
+
+""".format(log_file, sys.executable, current_path) + \
+"""
+netsh interface teredo set state type={} servername={}.
 
 :: Set IPv6 prefixpolicies
 :: 2001::/16 Aggregate global unicast address; not default
 :: 2002::/16 6to4 tunnel
 :: 2001::/32 teredo tunnel
-netsh interface ipv6 add prefixpolicy 2001::/16 35 1
+netsh interface ipv6 add prefixpolicy ::1/128 50 0
+netsh interface ipv6 set prefixpolicy ::1/128 50 0
+netsh interface ipv6 add prefixpolicy ::/0 40 1
+netsh interface ipv6 set prefixpolicy ::/0 40 1
+netsh interface ipv6 add prefixpolicy 2001::/16 35 6
+netsh interface ipv6 set prefixpolicy 2001::/16 35 6
+netsh interface ipv6 add prefixpolicy 2002::/16 30 2
 netsh interface ipv6 set prefixpolicy 2002::/16 30 2
-netsh interface ipv6 set prefixpolicy 2001::/32 25 2
+netsh interface ipv6 add prefixpolicy 2001::/32 25 5
+netsh interface ipv6 set prefixpolicy 2001::/32 25 5
+netsh interface ipv6 add prefixpolicy ::/96 20 3
+netsh interface ipv6 set prefixpolicy ::/96 20 3
+netsh interface ipv6 add prefixpolicy ::ffff:0:0/96 10 4
+netsh interface ipv6 set prefixpolicy ::ffff:0:0/96 10 4
 
 :: Fix look up AAAA on teredo
 :: http://technet.microsoft.com/en-us/library/bb727035.aspx
@@ -126,7 +143,7 @@ netsh interface ipv6 show prefixpolicies
 netsh interface ipv6 show address
 route print
 goto :eof
-""" % log_file
+"""
 
 
 disable_cmds="""
@@ -163,7 +180,7 @@ last_get_state_time = 0
 last_set_server_time = 0
 last_state = "unknown"
 
-client_ext = 'natawareclient' if float(platform.win32_ver()[0]) > 7 else 'enterpriseclient'
+client_ext = 'natawareclient' if platform.version()[0] > '6' else 'enterpriseclient'
 
 def client_type():
     try:
@@ -188,23 +205,69 @@ def state():
     r = run("netsh interface teredo show state")
     xlog.debug("netsh state: %s", r)
     type = get_line_value(r, 2)
-    last_state = get_line_value(r, 6)
-    if type == "disabled" or last_state == "offline":
+    if type == "disabled":
         last_state = "disabled"
-    elif last_state in ["qualified", "dormant"]:
-        last_state = "enable"
+    else:
+        last_state = get_line_value(r, 6) or "unknown"
+        if "probe" in last_state:
+            last_state = "probe"
 
     return last_state
+
+pp = {}
+
+def state_pp():
+    r = run("netsh interface ipv6 show prefixpolicies")
+    rls = r.split("\r\n")
+    pp.clear()
+    if len(rls) > 4:
+        for i in range(4, len(rls)):
+            if rls[i]:
+                priority , lable, prefix = rls[i].split()
+                pp[prefix] = int(priority), int(lable)
+
+    teredo = pp.get("2001::/32")
+    if teredo:
+        orig = pp.get("2001::/16", (teredo[0] - 2, len(pp) + 2))
+        return "origin" if orig[0] > teredo[0] else "teredo"
+
+
+def switch_pp():
+    teredo = pp.get("2001::/32")
+    if teredo is None:
+        state_pp()
+        teredo = pp.get("2001::/32")
+        if teredo is None:
+            return "Switch prefix policies fail, no teredo prefix policiy is found."
+
+    orig = pp.get("2001::/16", (teredo[0] - 2, len(pp) + 2))
+
+    cmds = [":output"]
+    cmds.append("netsh interface ipv6 set prefixpolicy %s %d %d" % ("2001::/32", orig[0], teredo[1]))
+    if "2001::/16" in pp:
+        cmds.append("netsh interface ipv6 set prefixpolicy %s %d %d" % ("2001::/16", teredo[0], orig[1]))
+    else:
+        cmds.append("netsh interface ipv6 add prefixpolicy %s %d %d" % ("2001::/16", teredo[0], orig[1]))
+    cmds.append("@call :output>" + log_file)
+
+    with open(switch_pp_temp, 'w') as fp:
+        fp.write("\n".join(cmds))
+    done = elevate(switch_pp_temp)
+
+    if done:
+        return "Switch prefix policies is complete."
+    else:
+        return "Switch prefix policies fail, you must authorized as admin."
 
 
 def enable(is_local=False):
     if not is_local:
         return "Please operating on local host."
 
-    if script_is_running:
+    if script_is_running or pteredor_is_running:
         return "Script is running, please retry later."
     else:
-        new_enable_cmds = enable_cmds % (client_type(), best_server())
+        new_enable_cmds = enable_cmds.format(client_type(), best_server())
         with open(enable_ipv6_temp, 'w') as fp:
             fp.write(new_enable_cmds)
         done = elevate(enable_ipv6_temp, False)
@@ -221,7 +284,7 @@ def disable(is_local=False):
     if not is_local:
         return "Please operating on local host."
 
-    if script_is_running:
+    if script_is_running or pteredor_is_running:
         return "Script is running, please retry later."
     else:
         with open(disable_ipv6_temp, 'w') as fp:
@@ -239,7 +302,7 @@ def set_best_server(is_local=False):
     if not is_local and not has_admin:
         return "Please operating on local host."
 
-    if script_is_running:
+    if script_is_running or pteredor_is_running:
         return "Script is running, please retry later."
     else:
         global last_set_server_time

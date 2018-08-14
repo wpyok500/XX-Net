@@ -42,19 +42,22 @@ class Task(object):
         return out_str
 
     def put_data(self, data):
+        # hyper H2
+        if isinstance(data, memoryview):
+            data = data.tobytes()
         self.body_queue.put(data)
         self.body_len += len(data)
 
     def read(self, size=None):
         # fail or cloe if return ""
         if self.body_readed == self.content_length:
-            return memoryview(b'')
+            return b''
 
         if size:
             while self.read_buffer_len < size:
                 data = self.body_queue.get(self.timeout)
                 if not data:
-                    return memoryview(b'')
+                    return b''
 
                 self.read_buffers.append(data)
                 self.read_buffer_len += len(data)
@@ -78,11 +81,11 @@ class Task(object):
                 if self.read_buffer_len == size:
                     self.read_buffers = []
                     self.read_buffer_len = 0
-                    data = buff_view
+                    data = buff_view.tobytes()
                 else:
-                    data = buff_view[:size]
+                    data = buff_view[:size].tobytes()
 
-                    self.read_buffers = [buff_view[size:]]
+                    self.read_buffers = [buff_view[size:].tobytes()]
                     self.read_buffer_len -= size
 
         else:
@@ -92,7 +95,7 @@ class Task(object):
             else:
                 data = self.body_queue.get(self.timeout)
                 if not data:
-                    return memoryview(b'')
+                    return b''
 
         self.body_readed += len(data)
         return data
@@ -120,18 +123,15 @@ class Task(object):
                 p += len(data)
 
             self.body_readed += p
-            return buff_view[:p]
+            return buff_view[:p].tobytes()
         else:
             out = list()
             while True:
                 data = self.read()
                 if not data:
                     break
-                if isinstance(data, memoryview):
-                    data = data.tobytes()
                 out.append(data)
-            out_buf = "".join(out)
-            return memoryview(out_buf)
+            return "".join(out)
 
     def set_state(self, stat):
         # for debug trace

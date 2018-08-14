@@ -82,7 +82,7 @@ class CertUtil(object):
         subj.organizationName = CertUtil.ca_vendor
         # Log generated time.
         subj.organizationalUnitName = '%s Root - %d' % (CertUtil.ca_vendor, int(time.time()))
-        subj.commonName = '%s XX-Net' % CertUtil.ca_vendor #TODO: here should be GoAgent
+        subj.commonName = '%s XX-Net' % CertUtil.ca_vendor
         ca.gmtime_adj_notBefore(- 3600 * 24)
         ca.gmtime_adj_notAfter(CertUtil.ca_validity - 3600 * 24)
         ca.set_issuer(subj)
@@ -149,9 +149,11 @@ class CertUtil(object):
 
         sans = set(sans) if sans else set()
         sans.add(commonname)
-        if not isip:
-            sans.add('*.' + commonname)
-        cert.add_extensions([OpenSSL.crypto.X509Extension(b'subjectAltName', True, ', '.join('DNS: %s' % x for x in sans))])
+        if isip:
+            sans = 'IP: ' + commonname
+        else:
+            sans = 'DNS: %s, DNS: *.%s' % (commonname,  commonname)
+        cert.add_extensions([OpenSSL.crypto.X509Extension(b'subjectAltName', True, sans)])
 
         cert.sign(CertUtil.ca_privatekey, CertUtil.ca_digest)
 
@@ -204,55 +206,21 @@ class CertUtil(object):
         return res
 
     @staticmethod
-    def import_windows_ca(common_name, certfile):
+    def import_windows_ca(certfile):
         xlog.debug("Begin to import Windows CA")
-        import ctypes
         with open(certfile, 'rb') as fp:
             certdata = fp.read()
             if certdata.startswith(b'-----'):
                 begin = b'-----BEGIN CERTIFICATE-----'
                 end = b'-----END CERTIFICATE-----'
                 certdata = base64.b64decode(b''.join(certdata[certdata.find(begin)+len(begin):certdata.find(end)].strip().splitlines()))
-            crypt32 = ctypes.WinDLL(b'crypt32.dll'.decode())
-            store_handle = crypt32.CertOpenStore(10, 0, 0, 0x4000 | 0x20000, b'ROOT'.decode())
-            if not store_handle:
-                return False
-            CERT_FIND_SUBJECT_STR = 0x00080007
-            CERT_FIND_HASH = 0x10000
-            X509_ASN_ENCODING = 0x00000001
-            class CRYPT_HASH_BLOB(ctypes.Structure):
-                _fields_ = [('cbData', ctypes.c_ulong), ('pbData', ctypes.c_char_p)]
-            assert CertUtil.ca_thumbprint
-            crypt_hash = CRYPT_HASH_BLOB(20, binascii.a2b_hex(CertUtil.ca_thumbprint.replace(':', '')))
-            crypt_handle = crypt32.CertFindCertificateInStore(store_handle, X509_ASN_ENCODING, 0, CERT_FIND_HASH, ctypes.byref(crypt_hash), None)
-            if crypt_handle:
-                crypt32.CertFreeCertificateContext(crypt_handle)
-                return True
+        try:
+            common_name = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_ASN1, certdata).get_subject().CN
+        except Exception as e:
+            logging.error('load_certificate(certfile=%r) 失败：%s', certfile, e)
+            return -1
 
-            ret = crypt32.CertAddEncodedCertificateToStore(store_handle, 0x1, certdata, len(certdata), 4, None)
-            crypt32.CertCloseStore(store_handle, 0)
-            del crypt32
-
-
-            if not ret and __name__ != "__main__":
-                #res = CertUtil.win32_notify(msg=u'Import GoAgent Ca?', title=u'Authority need')
-                #if res == 2:
-                #    return -1
-
-                import win32elevate
-                try:
-                    win32elevate.elevateAdminRun(os.path.abspath(__file__))
-                except Exception as e:
-                    xlog.warning('CertUtil.import_windows_ca failed: %r', e)
-                return True
-            else:
-                CertUtil.win32_notify(msg=u'已经导入GoAgent证书，请重启浏览器.', title=u'Restart browser need.')
-
-            return True if ret else False
-
-    @staticmethod
-    def remove_windows_ca(name):
-        xlog.debug("Removing windows CA")
+        assert certdata, 'cert file %r is broken' % certfile
         import ctypes
         import ctypes.wintypes
         class CERT_CONTEXT(ctypes.Structure):
@@ -262,23 +230,84 @@ class CertUtil(object):
                 ('cbCertEncoded', ctypes.wintypes.DWORD),
                 ('pCertInfo', ctypes.c_void_p),
                 ('hCertStore', ctypes.c_void_p),]
-        try:
-            crypt32 = ctypes.WinDLL(b'crypt32.dll'.decode())
-            store_handle = crypt32.CertOpenStore(10, 0, 0, 0x4000 | 0x20000, b'ROOT'.decode())
-            pCertCtx = crypt32.CertEnumCertificatesInStore(store_handle, None)
-            while pCertCtx:
-                certCtx = CERT_CONTEXT.from_address(pCertCtx)
-                certdata = ctypes.string_at(certCtx.pbCertEncoded, certCtx.cbCertEncoded)
-                cert =  OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_ASN1, certdata)
-                if hasattr(cert, 'get_subject'):
-                    cert = cert.get_subject()
-                cert_name = next((v for k, v in cert.get_components() if k == 'CN'), '')
-                if cert_name and name == cert_name:
-                    crypt32.CertDeleteCertificateFromStore(crypt32.CertDuplicateCertificateContext(pCertCtx))
-                pCertCtx = crypt32.CertEnumCertificatesInStore(store_handle, pCertCtx)
-        except Exception as e:
-            xlog.warning('CertUtil.remove_windows_ca failed: %r', e)
+        X509_ASN_ENCODING = 0x1
+        CERT_STORE_ADD_ALWAYS = 4
+        CERT_STORE_PROV_SYSTEM = 10
+        CERT_STORE_OPEN_EXISTING_FLAG = 0x4000
+        CERT_SYSTEM_STORE_CURRENT_USER = 1 << 16
+        CERT_SYSTEM_STORE_LOCAL_MACHINE = 2 << 16
+        CERT_FIND_SUBJECT_STR = 8 << 16 | 7
+        crypt32 = ctypes.windll.crypt32
+        ca_exists = False
+        store_handle = None
+        pCertCtx = None
+        ret = 0
+        for store in (CERT_SYSTEM_STORE_LOCAL_MACHINE, CERT_SYSTEM_STORE_CURRENT_USER):
+            try:
+                store_handle = crypt32.CertOpenStore(CERT_STORE_PROV_SYSTEM, 0, None, CERT_STORE_OPEN_EXISTING_FLAG | store, u'root')
+                if not store_handle:
+                    if store == CERT_SYSTEM_STORE_CURRENT_USER and not ca_exists:
+                        xlog.warning('CertUtil.import_windows_ca failed: could not open system cert store')
+                        return False
+                    else:
+                        continue
 
+                pCertCtx = crypt32.CertFindCertificateInStore(store_handle, X509_ASN_ENCODING, 0, CERT_FIND_SUBJECT_STR, common_name, None)
+                while pCertCtx:
+                    certCtx = CERT_CONTEXT.from_address(pCertCtx)
+                    _certdata = ctypes.string_at(certCtx.pbCertEncoded, certCtx.cbCertEncoded)
+                    if _certdata == certdata:
+                        ca_exists = True
+                        xlog.debug("XX-Net CA already exists")
+                    else:
+                        cert =  OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_ASN1, _certdata)
+                        if hasattr(cert, 'get_subject'):
+                             cert = cert.get_subject()
+                        cert_name = next((v for k, v in cert.get_components() if k == 'CN'), '')
+                        if cert_name == common_name:
+                            ret = crypt32.CertDeleteCertificateFromStore(crypt32.CertDuplicateCertificateContext(pCertCtx))
+                            if ret == 1:
+                                xlog.debug("Invalid Windows CA %r has been removed", common_name)
+                            elif ret == 0 and store == CERT_SYSTEM_STORE_LOCAL_MACHINE:
+                                # to elevate
+                                break
+                    pCertCtx = crypt32.CertFindCertificateInStore(store_handle, X509_ASN_ENCODING, 0, CERT_FIND_SUBJECT_STR, common_name, pCertCtx)
+
+                # Only add to current user
+                if store == CERT_SYSTEM_STORE_CURRENT_USER and not ca_exists:
+                    ret = crypt32.CertAddEncodedCertificateToStore(store_handle, X509_ASN_ENCODING, certdata, len(certdata), CERT_STORE_ADD_ALWAYS, None)
+            except Exception as e:
+                xlog.warning('CertUtil.import_windows_ca failed: %r', e)
+                if isinstance(e, OSError):
+                    store_handle = None
+                    continue
+                return False
+            finally:
+                if pCertCtx:
+                    crypt32.CertFreeCertificateContext(pCertCtx)
+                    pCertCtx = None
+                if store_handle:
+                    crypt32.CertCloseStore(store_handle, 0)
+                    store_handle = None
+
+        if ca_exists:
+            return True
+
+        if ret == 0 and __name__ != "__main__":
+            #res = CertUtil.win32_notify(msg=u'Import GoAgent Ca?', title=u'Authority need')
+            #if res == 2:
+            #    return -1
+
+            import win32elevate
+            try:
+                win32elevate.elevateAdminRun(os.path.abspath(__file__))
+            except Exception as e:
+                xlog.warning('CertUtil.import_windows_ca failed: %r', e)
+            return True
+        elif ret == 1:
+            CertUtil.win32_notify(msg=u'已经导入GoAgent证书，请重启浏览器.', title=u'Restart browser need.')
+
+        return ret == 1
 
     @staticmethod
     def get_linux_firefox_path():
@@ -354,7 +383,6 @@ class CertUtil(object):
             xlog.info("Database $HOME/.pki/nssdb cert exist")
             return
 
-
         # shell command to list all cert
         # certutil -L -d sql:$HOME/.pki/nssdb
 
@@ -368,7 +396,6 @@ class CertUtil(object):
         cmd_line = 'certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n "%s" -i "%s"' % (common_name, ca_file)
         os.system(cmd_line)
         return True
-
 
     @staticmethod
     def import_ubuntu_system_ca(common_name, certfile):
@@ -403,8 +430,6 @@ class CertUtil(object):
             return False
         else:
             return True
-
-
 
     @staticmethod
     def import_mac_ca(common_name, certfile):
@@ -441,8 +466,7 @@ class CertUtil(object):
         xlog.debug("Importing CA")
         commonname = "GoAgent XX-Net - GoAgent" #TODO: here should be GoAgent - XX-Net
         if sys.platform.startswith('win'):
-            CertUtil.remove_windows_ca('%s CA' % CertUtil.ca_vendor)
-            CertUtil.import_windows_ca(commonname, certfile)
+            CertUtil.import_windows_ca(certfile)
         elif sys.platform == 'darwin':
             CertUtil.import_mac_ca(commonname, certfile)
         elif sys.platform.startswith('linux'):

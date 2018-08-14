@@ -113,8 +113,11 @@ USAGE:
 start -h
   show help.
 
-start -allow_remote
-  enable remote connect.
+start
+ -allow_remote
+   enable remote connect.
+ -hungup
+   start with nohup to run in background.
 
 start set_iptables [interface]
   set iptables for transparent proxy.
@@ -166,23 +169,28 @@ unset_iptables(){
 
 
 ARGS=$@
+HANGUP='0'
 while [ -n "$1" ]; do
 case $1 in
 
 -h) help;shift 1;;
+
 -allow_remote)shift 1;;
+
+-hungup)HANGUP='1';shift 1;;
+
 set_iptables) set_iptables $2;;
+
 unset_iptables) unset_iptables $2;;
 
-–) break;;
--*) echo "error: no such option $1. -h for help";exit 1;;
-*) break;;
+*) echo "unknown option $1."; shift 1;;
 esac
 done
 
 
 # Start Application
-if [ $os_name = 'Darwin' ] && ! [ "$1" = '-hungup' ]; then
+if [ $os_name = 'Darwin' ] && ! [ $HANGUP = '1' ]; then
+    echo "Run XX-Net in background."
     PYTHON="/usr/bin/python2.7"
     launchWithNoHungup $ARGS
 else

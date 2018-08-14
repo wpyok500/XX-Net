@@ -6,9 +6,10 @@ import os
 import cgi
 import time
 import hashlib
-
-from xlog import getLogger
 import threading
+
+import utils
+from xlog import getLogger
 xlog = getLogger("x_tunnel")
 
 import simple_http_server
@@ -202,6 +203,8 @@ class ControlHandler(simple_http_server.HttpServerHandler):
             res_arr = {
                 "res": "success",
                 "login_account": "%s" % (g.config.login_account),
+                "promote_code": g.promote_code,
+                "promoter": g.promoter,
                 "balance": "%f" % (g.balance),
                 "quota": "%d" % (g.quota),
                 "quota_list": g.quota_list,
@@ -219,7 +222,9 @@ class ControlHandler(simple_http_server.HttpServerHandler):
                 return True
 
         username    = str(self.postvars['username'][0])
+        #username = utils.get_printable(username)
         password    = str(self.postvars['password'][0])
+        promoter = self.postvars.get("promoter", [""])[0]
         is_register = int(self.postvars['is_register'][0])
 
         pa = check_email(username)
@@ -247,7 +252,8 @@ class ControlHandler(simple_http_server.HttpServerHandler):
         else:
             password_hash = str(hashlib.sha256(password).hexdigest())
 
-        res, reason = proxy_session.request_balance(username, password_hash, is_register, update_server=True)
+        res, reason = proxy_session.request_balance(username, password_hash, is_register,
+                                                    update_server=True, promoter=promoter)
         if res:
             g.config.login_account  = username
             g.config.login_password = password_hash
@@ -297,11 +303,25 @@ class ControlHandler(simple_http_server.HttpServerHandler):
             }
             res = {
                 'server': server,
+                'promoter': g.promoter
             }
         elif reqs['cmd'] == ['set']:
             if 'server' in self.postvars:
                 server = str(self.postvars['server'][0])
                 server = '' if server == 'auto' else server
+
+                promoter = self.postvars.get("promoter", [""])[0]
+                if promoter != g.promoter:
+                    res, info = proxy_session.call_api("/set_config", {
+                        "account": g.config.login_account,
+                        "password": g.config.login_password,
+                        "promoter": promoter
+                    })
+                    if not res:
+                        xlog.warn("set_config fail:%s", info)
+                        return self.response_json({"res": "fail", "reason": info})
+                    else:
+                        g.promoter = promoter
 
                 if is_server_available(server):
                     if server != g.config.server_host:

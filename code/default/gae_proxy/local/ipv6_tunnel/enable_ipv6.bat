@@ -38,6 +38,7 @@ sc start RpcSs
 
 sc config nsi start= auto
 sc start nsi
+
 sc config Winmgmt start= auto
 sc start Winmgmt
 
@@ -53,6 +54,9 @@ sc start iphlpsvc
 :: Reset IPv6
 netsh interface ipv6 reset
 
+:: Reset Group Policy Teredo
+..\..\..\python27\1.0\pythonw.exe win_reset_gp.py
+
 netsh interface teredo set state type=enterpriseclient servername=teredo.remlab.net.
 
 :: Keep teredo interface route (not needed with reset?)
@@ -63,9 +67,20 @@ netsh interface teredo set state type=enterpriseclient servername=teredo.remlab.
 :: 2001::/16 Aggregate global unicast address; not default
 :: 2002::/16 6to4 tunnel
 :: 2001::/32 teredo tunnel
-netsh interface ipv6 add prefixpolicy 2001::/16 35 1
+netsh interface ipv6 add prefixpolicy ::1/128 50 0
+netsh interface ipv6 set prefixpolicy ::1/128 50 0
+netsh interface ipv6 add prefixpolicy ::/0 40 1
+netsh interface ipv6 set prefixpolicy ::/0 40 1
+netsh interface ipv6 add prefixpolicy 2001::/16 35 6
+netsh interface ipv6 set prefixpolicy 2001::/16 35 6
+netsh interface ipv6 add prefixpolicy 2002::/16 30 2
 netsh interface ipv6 set prefixpolicy 2002::/16 30 2
-netsh interface ipv6 set prefixpolicy 2001::/32 25 2
+netsh interface ipv6 add prefixpolicy 2001::/32 25 5
+netsh interface ipv6 set prefixpolicy 2001::/32 25 5
+netsh interface ipv6 add prefixpolicy ::/96 20 3
+netsh interface ipv6 set prefixpolicy ::/96 20 3
+netsh interface ipv6 add prefixpolicy ::ffff:0:0/96 10 4
+netsh interface ipv6 set prefixpolicy ::ffff:0:0/96 10 4
 
 :: Fix look up AAAA on teredo
 :: http://technet.microsoft.com/en-us/library/bb727035.aspx
@@ -75,15 +90,14 @@ Reg add HKLM\SYSTEM\CurrentControlSet\services\Dnscache\Parameters /v AddrConfig
 :: Enable all IPv6 parts
 Reg add HKLM\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters /v DisabledComponents /t REG_DWORD /d 0 /f
 
-:: Set Group Policy
-:: HKLM\Software\Policies\Microsoft\Windows\TCPIP\v6Transition -Name Teredo_DefaultQualified 
-:: HKLM\Software\Policies\Microsoft\Windows\TCPIP\v6Transition -Name Teredo_State 
-
 
 ipconfig /flushdns
 
 set time=%date:~0,4%-%date:~5,2%-%date:~8,2%_%time:~0,2%%time:~3,2%%time:~6,2%
-@call :output>..\..\..\..\..\data\gae_proxy\ipv6-state%time%.txt 
+@call :output>..\..\..\..\..\data\gae_proxy\ipv6-state%time%.txt
+
+@echo Over
+@echo Reboot system at first time!
 exit
 
 :output

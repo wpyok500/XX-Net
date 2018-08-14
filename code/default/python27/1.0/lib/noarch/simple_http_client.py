@@ -316,7 +316,7 @@ class Response(BaseResponse):
             data = self._read_plain(read_len, timeout)
         else:
             data = self._read_chunked(timeout)
-        return memoryview(data)
+        return data
 
     def readall(self, timeout=60):
         start_time = time.time()

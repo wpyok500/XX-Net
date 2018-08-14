@@ -33,7 +33,7 @@ from http2_connection import Http2Worker
 
 
 class HttpsDispatcher(object):
-    idle_time = 20 * 60
+    idle_time = 2 * 60
 
     def __init__(self, logger, config, ip_manager, connection_manager,
                  http1worker=Http1Worker,
@@ -357,7 +357,8 @@ class HttpsDispatcher(object):
 
     def close_all_worker(self, reason="close all worker"):
         for w in list(self.workers):
-            w.close(reason)
+            if w.accept_task:
+                w.close(reason)
 
         self.workers = []
         self.h1_num = 0
